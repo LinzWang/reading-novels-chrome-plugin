@@ -1,7 +1,7 @@
 # 阅读模式朗读 Edge 扩展
 
 一个 Microsoft Edge / Chromium Manifest V3 扩展，用于把网页正文转换为阅读模式，并使用浏览器 Web Speech API 朗读。支持点击正文切换朗读起点、预加载下一页、本页结束后自动续读下一页。
-
+测试推送
 > 说明：Edge 内置“朗读此页 / Read Aloud”没有公开扩展 API。本扩展使用 `speechSynthesis` 调用浏览器/系统可用语音，而不是控制 Edge 私有朗读 UI。
 
 ## 功能
