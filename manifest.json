@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "阅读模式朗读",
+  "version": "0.1.0",
+  "description": "将网页转换为阅读模式，使用浏览器语音朗读，并自动预加载下一页。",
+  "action": {
+    "default_title": "打开阅读模式朗读"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "minimum_chrome_version": "110",
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      },
+      "scope": "chrome",
+      "description": "打开阅读模式朗读"
+    },
+    "toggle_play_pause": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Space",
+        "mac": "Command+Shift+Space"
+      },
+      "scope": "chrome",
+      "description": "开始/暂停朗读"
+    },
+    "stop_speaking": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "scope": "chrome",
+      "description": "停止朗读"
+    }
+  }
+}
