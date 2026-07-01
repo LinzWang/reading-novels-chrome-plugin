@@ -1,6 +1,9 @@
 import type { ReaderSettings, TextSegment } from '../shared/page-model';
 import { DEFAULT_READER_SETTINGS } from '../shared/page-model';
 
+const MAX_RECOVERABLE_ERROR_RETRIES = 3;
+const RECOVERABLE_SPEECH_ERRORS = new Set<string>(['synthesis-failed', 'audio-busy', 'audio-hardware', 'network']);
+
 export interface SpeechControllerCallbacks {
   onSegmentStart?: (segment: TextSegment, index: number) => void;
   onStateChange?: (state: SpeechState) => void;
@@ -28,6 +31,10 @@ export class SpeechController {
   private currentUtterance?: SpeechSynthesisUtterance;
   private keepAlive?: number;
   private watchdogTimer?: number;
+  private retryTimer?: number;
+  private retryCount = 0;
+  private readonly handleVisibilityRecovery = () => this.recoverIfSpeechDropped();
+  private readonly handleLifecycleResume = () => this.recoverIfSpeechDropped();
   // 循环静音音频：浏览器检测到媒体在播放，就不会节流后台标签页的定时器，
   // 也不会暂停后台 speechSynthesis —— 这是让朗读能在切标签/后台时继续的关键。
   private keepAliveAudioCtx?: AudioContext;
@@ -40,6 +47,8 @@ export class SpeechController {
     //   - 当前段已结束但全局没声音了 → 重新朗读当前 index（覆盖 onend 丢失、后台断流等情况）
     // 用户意图为 'paused'（手动暂停 / 其他标签页接管）时完全不干预，等用户手动点继续。
     this.keepAlive = window.setInterval(() => this.keepAliveTick(), 800);
+    document.addEventListener('visibilitychange', this.handleVisibilityRecovery);
+    window.addEventListener('resume', this.handleLifecycleResume);
   }
 
   private keepAliveTick(): void {
@@ -51,9 +60,16 @@ export class SpeechController {
       return;
     }
 
+    this.recoverIfSpeechDropped();
+  }
+
+  private recoverIfSpeechDropped(): void {
+    if (this.userIntent !== 'play' || this.retryTimer) return;
+    if (!('speechSynthesis' in globalThis)) return;
+
     // 没在说话也没在排队（onend 丢失、后台被 cancel 断流等）→ 重新朗读当前位置
     // 仅在页面可见时重启：后台不主动 speakFrom，避免和其他标签页抢全局队列
-    // 切回本页（visible）时若已断流，从这里从断点继续
+    // 切回本页或 Page Lifecycle resume 后若已断流，从这里从断点继续。
     if (document.visibilityState === 'visible' && !speechSynthesis.speaking && !speechSynthesis.pending) {
       this.speakFrom(this.index);
     }
@@ -108,7 +124,8 @@ export class SpeechController {
       return;
     }
 
-    // console.log('[TTS] speakFrom', index, 'segments', this.segments.length);
+    this.clearRetryTimer();
+    this.retryCount = 0;
     this.runId += 1;
     this.userIntent = 'play';
     this.startKeepAliveAudio();
@@ -148,10 +165,22 @@ export class SpeechController {
       speechSynthesis.cancel();
       this.clearWatchdog();
     }
+    this.clearRetryTimer();
+    this.retryCount = 0;
     this.stopKeepAliveAudio();
     this.userIntent = 'idle';
     this.currentUtterance = undefined;
     this.setState('idle');
+  }
+
+  dispose(): void {
+    this.stop();
+    if (this.keepAlive) {
+      window.clearInterval(this.keepAlive);
+      this.keepAlive = undefined;
+    }
+    document.removeEventListener('visibilitychange', this.handleVisibilityRecovery);
+    window.removeEventListener('resume', this.handleLifecycleResume);
   }
 
   private speakCurrent(runId: number): void {
@@ -253,6 +282,11 @@ export class SpeechController {
         return;
       }
 
+      if (this.shouldRetryRecoverableError(event.error)) {
+        this.scheduleRecoverableRetry(runId, event.error);
+        return;
+      }
+
       // 只有真正的意外错误才报告
       this.callbacks.onError?.(`朗读失败：${event.error}`);
       this.userIntent = 'idle';
@@ -265,6 +299,7 @@ export class SpeechController {
         return;
       }
       this.index += 1;
+      this.retryCount = 0;
       this.currentUtterance = undefined;
       if (this.index >= this.segments.length) {
         this.userIntent = 'idle';
@@ -301,6 +336,7 @@ export class SpeechController {
       console.warn('SpeechSynthesis onend missed - forcing next segment');
       this.clearWatchdog();
       this.index += 1;
+      this.retryCount = 0;
       this.currentUtterance = undefined;
       if (this.index >= this.segments.length) {
         this.userIntent = 'idle';
@@ -315,6 +351,7 @@ export class SpeechController {
       this.clearWatchdog();
       speechSynthesis.cancel();
       this.index += 1;
+      this.retryCount = 0;
       this.currentUtterance = undefined;
       if (this.index >= this.segments.length) {
         this.userIntent = 'idle';
@@ -334,6 +371,34 @@ export class SpeechController {
       clearTimeout(this.watchdogTimer);
       this.watchdogTimer = undefined;
     }
+  }
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
+  }
+
+  private shouldRetryRecoverableError(error: string): boolean {
+    return RECOVERABLE_SPEECH_ERRORS.has(error) && this.retryCount < MAX_RECOVERABLE_ERROR_RETRIES;
+  }
+
+  private scheduleRecoverableRetry(runId: number, error: string): void {
+    this.retryCount += 1;
+    const retryDelayMs = this.retryCount * 300;
+    console.warn(`[TTS] Recoverable speech error "${error}", retrying ${this.retryCount}/${MAX_RECOVERABLE_ERROR_RETRIES}`);
+    this.clearRetryTimer();
+    if ('speechSynthesis' in globalThis) {
+      speechSynthesis.cancel();
+    }
+    this.retryTimer = window.setTimeout(() => {
+      this.retryTimer = undefined;
+      if (runId !== this.runId || this.userIntent !== 'play') {
+        return;
+      }
+      this.speakCurrent(runId);
+    }, retryDelayMs);
   }
 
   /**

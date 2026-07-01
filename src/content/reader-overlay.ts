@@ -82,7 +82,7 @@ export class ReaderOverlay {
   }
 
   destroy(): void {
-    this.speech.stop();
+    this.speech.dispose();
     this.host.remove();
     // 恢复原页面滚动条
     document.documentElement.style.overflow = this.originalOverflow;
